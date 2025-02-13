@@ -1,8 +1,10 @@
+from logging import log
 import time
 import pandas as pd
 import ta
 from binance.client import Client
 from flask import Flask, render_template_string
+from threading import Thread
 
 # ⚠️ ENTRE TES CLÉS API BINANCE ICI
 API_KEY = "b1iSUhVmS1wyO6lLy7eKqgjp8NQ1zBCaVSHv47nE1toXuuFZ2tBpyMIsOrOzd6Vk"
@@ -20,19 +22,33 @@ MIN_VOLUME = 100000  # Volume min pour éviter les cryptos illiquides
 
 # Flask app setup
 app = Flask(__name__)
+LOG_FILE = "logs.txt"
 logs = []
 
-# Obtenir le solde disponible en USDT
+
+def log_message(message):
+    
+    print(message)
+    logs.append(message)
+    
+    # Sauvegarde persistante des logs avec encodage UTF-8
+    with open("logs.txt", "a", encoding="utf-8") as log_file:
+        log_file.write(message + "\n")
+
+
+def load_logs():
+    with open("logs.txt", "r", encoding="utf-8") as file:
+        return file.readlines()
+
+
 def get_balance():
     balance = client.get_asset_balance(asset="USDT")
     return float(balance["free"])
 
-# Récupérer les cryptos disponibles sur Binance (USDT uniquement)
 def get_usdt_pairs():
     tickers = client.get_exchange_info()["symbols"]
     return [t["symbol"] for t in tickers if t["symbol"].endswith("USDT") and t["status"] == "TRADING"]
 
-# Récupérer les données historiques pour une crypto
 def get_historical_data(symbol, interval, limit=100):
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
@@ -45,11 +61,9 @@ def get_historical_data(symbol, interval, limit=100):
         log_message(f"❌ Erreur récupération {symbol}: {e}")
         return None
 
-# Calcul du RSI
 def calculate_rsi(df):
     return ta.momentum.RSIIndicator(df["close"], window=RSI_PERIOD).rsi().iloc[-1]
 
-# Sélectionner la crypto avec le RSI le plus bas
 def find_best_crypto(pairs):
     best_crypto = None
     lowest_rsi = 100
@@ -63,10 +77,9 @@ def find_best_crypto(pairs):
                 best_crypto = pair
     return best_crypto, lowest_rsi
 
-# Passer un ordre d'achat
 def place_buy_order(symbol, amount_usdt):
     price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-    quantity = round(amount_usdt / price, 6)  # Calcul de la quantité achetable
+    quantity = round(amount_usdt / price, 6)
     try:
         order = client.create_order(
             symbol=symbol,
@@ -78,7 +91,6 @@ def place_buy_order(symbol, amount_usdt):
     except Exception as e:
         log_message(f"❌ ERREUR ACHAT {symbol}: {e}")
 
-# Passer un ordre de vente
 def place_sell_order(symbol):
     asset = symbol.replace("USDT", "")
     balance = client.get_asset_balance(asset=asset)
@@ -95,50 +107,33 @@ def place_sell_order(symbol):
         except Exception as e:
             log_message(f"❌ ERREUR VENTE {symbol}: {e}")
 
-# Fonction pour ajouter un message aux logs
-def log_message(message):
-    print(message)
-    logs.append(message)
-
-# Boucle principale du bot
 def run_bot():
     while True:
         log_message("\n🔄 Analyse du marché...")
-
-        # Récupérer toutes les paires USDT
         usdt_pairs = get_usdt_pairs()
-
-        # Trouver la meilleure opportunité d'achat
         best_crypto, best_rsi = find_best_crypto(usdt_pairs)
         
         if best_crypto:
             log_message(f"📊 MEILLEURE OPPORTUNITÉ : {best_crypto} | RSI: {best_rsi:.2f}")
-
             balance = get_balance()
             log_message(f"💰 Solde USDT: {balance:.2f}")
-
-            # Achat si le RSI est inférieur à 30 et assez de capital disponible
             if best_rsi < RSI_OVERSOLD and balance >= 10:
                 amount_to_invest = min(balance, CAPITAL_MAX)
                 place_buy_order(best_crypto, amount_to_invest)
-
-            # Vérifier si on doit vendre une position existante
             for pair in usdt_pairs:
                 df = get_historical_data(pair, Client.KLINE_INTERVAL_15MINUTE)
                 if df is not None and len(df) > RSI_PERIOD:
                     rsi = calculate_rsi(df)
                     if rsi > RSI_OVERBOUGHT:
                         place_sell_order(pair)
-        
         else:
             log_message("❌ Aucune opportunité trouvée")
-
         log_message("⏳ Attente de 15 minutes avant la prochaine analyse...")
         time.sleep(900)
 
-# Route pour afficher les logs
 @app.route('/')
 def index():
+    logs = load_logs()
     return render_template_string("""
     <!doctype html>
     <html lang="en">
@@ -146,18 +141,31 @@ def index():
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
         <title>Python Trade Bot Logs</title>
+        <script>
+          function refreshLogs() {
+            fetch('/logs')
+              .then(response => response.text())
+              .then(data => {
+                document.getElementById('logs').innerText = data;
+              });
+          }
+          setInterval(refreshLogs, 5000);
+        </script>
       </head>
       <body>
         <div class="container">
           <h1>Python Trade Bot Logs</h1>
-          <pre>{{ logs }}</pre>
+          <pre id="logs">{{ logs }}</pre>
         </div>
       </body>
     </html>
-    """, logs="\n".join(logs))
+    """, logs="".join(logs))
+
+@app.route('/logs')
+def get_logs():
+    return "".join(load_logs())
 
 if __name__ == '__main__':
-    from threading import Thread
     bot_thread = Thread(target=run_bot)
     bot_thread.start()
     app.run(host='0.0.0.0', port=5000)
