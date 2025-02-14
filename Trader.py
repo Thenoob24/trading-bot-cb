@@ -40,6 +40,28 @@ def load_logs():
     with open("logs.txt", "r", encoding="utf-8") as file:
         return file.readlines()
 
+def get_lot_size(symbol):
+    """Récupère la quantité minimale et le stepSize pour une paire de trading."""
+    exchange_info = client.get_exchange_info()
+    for s in exchange_info["symbols"]:
+        if s["symbol"] == symbol:
+            for f in s["filters"]:
+                if f["filterType"] == "LOT_SIZE":
+                    min_qty = float(f["minQty"])
+                    step_size = float(f["stepSize"])
+                    return min_qty, step_size
+    return None, None
+
+def get_min_notional(symbol):
+    exchange_info = client.get_exchange_info()
+    for s in exchange_info["symbols"]:
+        if s["symbol"] == symbol:
+            for f in s["filters"]:
+                if f["filterType"] == "NOTIONAL":
+                    return float(f["minNotional"])
+    return None
+
+
 
 def get_balance():
     balance = client.get_asset_balance(asset="USDT")
@@ -79,7 +101,19 @@ def find_best_crypto(pairs):
 
 def place_buy_order(symbol, amount_usdt):
     price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-    quantity = round(amount_usdt / price, 6)
+    min_qty, step_size = get_lot_size(symbol)
+    
+    if not min_qty or not step_size:
+        log_message(f"❌ Impossible de récupérer la taille de lot pour {symbol}")
+        return
+    
+    quantity = amount_usdt / price
+    quantity = round(quantity - (quantity % step_size), 6)  # Ajuster au stepSize
+    
+    if quantity < min_qty:
+        log_message(f"❌ Quantité {quantity} trop petite pour {symbol} (min {min_qty})")
+        return
+
     try:
         order = client.create_order(
             symbol=symbol,
@@ -91,21 +125,45 @@ def place_buy_order(symbol, amount_usdt):
     except Exception as e:
         log_message(f"❌ ERREUR ACHAT {symbol}: {e}")
 
+
 def place_sell_order(symbol):
     asset = symbol.replace("USDT", "")
     balance = client.get_asset_balance(asset=asset)
+
+    if not balance or float(balance["free"]) == 0:
+        log_message(f"❌ Pas de solde suffisant pour vendre {symbol}")
+        return
+
     quantity = float(balance["free"])
-    if quantity > 0.0001:
-        try:
-            order = client.create_order(
-                symbol=symbol,
-                side="SELL",
-                type="MARKET",
-                quantity=round(quantity, 6)
-            )
-            log_message(f"✅ VENTE {symbol}: {order}")
-        except Exception as e:
-            log_message(f"❌ ERREUR VENTE {symbol}: {e}")
+    price = float(client.get_symbol_ticker(symbol=symbol)["price"])
+    
+    min_qty, step_size = get_lot_size(symbol)
+    min_notional = get_min_notional(symbol)
+
+    if not min_qty or not step_size or not min_notional:
+        log_message(f"❌ Impossible de récupérer les filtres pour {symbol}")
+        return
+
+    # Ajuster la quantité au stepSize
+    quantity = round(quantity - (quantity % step_size), 6)
+
+    # Vérifier la valeur totale du trade
+    if (quantity * price) < min_notional:
+        log_message(f"❌ Valeur du trade trop faible : {quantity * price:.2f} USDT (min {min_notional:.2f} USDT)")
+        return
+
+    try:
+        order = client.create_order(
+            symbol=symbol,
+            side="SELL",
+            type="MARKET",
+            quantity=quantity
+        )
+        log_message(f"✅ VENTE {symbol}: {order}")
+    except Exception as e:
+        log_message(f"❌ ERREUR VENTE {symbol}: {e}")
+
+
 
 def run_bot():
     while True:
